@@ -1,0 +1,22 @@
+name: Validate FC OS
+
+on:
+  push:
+    branches: [v2-development]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run build
