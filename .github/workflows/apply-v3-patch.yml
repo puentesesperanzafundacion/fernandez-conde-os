@@ -4,8 +4,7 @@ on:
   push:
     branches: [v3-development]
     paths:
-      - scripts/patch_v3.py
-      - .github/workflows/apply-v3-patch.yml
+      - scripts/**
 
 permissions:
   contents: write
