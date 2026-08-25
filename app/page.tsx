@@ -138,7 +138,7 @@ function uuid() {
 
 function fmtDate(value: string | null, withTime = false) {
   if (!value) return "—";
-  const date = new Date(value);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(value) ? new Date(`${value}T12:00:00`) : new Date(value);
   return new Intl.DateTimeFormat("es-MX", withTime ? { dateStyle: "medium", timeStyle: "short" } : { dateStyle: "medium" }).format(date);
 }
 
@@ -501,6 +501,7 @@ export default function Home() {
       matterPatch.next_action_due_at = data.nextActionDue ? new Date(data.nextActionDue).toISOString() : null;
     }
     await supabase.from("matters").update(matterPatch).eq("id", selectedMatter.id);
+    setSelectedMatter((current) => current ? { ...current, updated_at: String(matterPatch.updated_at), next_action: data.nextAction || current.next_action, next_action_due_at: data.nextAction ? (matterPatch.next_action_due_at ?? null) : current.next_action_due_at } : current);
     await supabase.from("case_events").insert({
       matter_id: selectedMatter.id,
       stage_instance_id: stage.id,
@@ -622,9 +623,9 @@ export default function Home() {
     await loadMatter(selectedMatter.id);
   }
 
-  async function askJarvis(event?: FormEvent<HTMLFormElement>) {
+  async function askJarvis(event?: FormEvent<HTMLFormElement>, override?: string) {
     event?.preventDefault();
-    const q = jarvisQuery.trim().toLowerCase();
+    const q = (override ?? jarvisQuery).trim().toLowerCase();
     if (!q) return;
     if (q.includes("incidencia") || q.includes("problema")) {
       const critical = allIncidents.filter((item) => ["HIGH", "CRITICAL"].includes(item.severity));
@@ -813,7 +814,7 @@ export default function Home() {
               <div className="jarvisMark">J</div>
               <div className="jarvisBody"><p>{jarvisAnswer}</p></div>
               <form className="jarvisAsk" onSubmit={(event) => void askJarvis(event)}><input value={jarvisQuery} onChange={(event) => setJarvisQuery(event.target.value)} placeholder="Ej. ¿Qué tengo hoy? / Estado de Carlos / Amparos abiertos"/><button className="primary">Consultar</button></form>
-              <div className="quickPrompts">{["¿Qué tengo hoy?","Incidencias críticas","Asuntos COMAR","Amparos abiertos"].map((prompt) => <button key={prompt} onClick={() => { setJarvisQuery(prompt); setTimeout(() => void askJarvis(), 0); }}>{prompt}</button>)}</div>
+              <div className="quickPrompts">{["¿Qué tengo hoy?","Incidencias críticas","Asuntos COMAR","Amparos abiertos"].map((prompt) => <button key={prompt} onClick={() => { setJarvisQuery(prompt); void askJarvis(undefined, prompt); }}>{prompt}</button>)}</div>
             </section>
           </>
         )}
@@ -821,7 +822,7 @@ export default function Home() {
 
       {modal === "client" && <Modal title="Nuevo cliente" close={() => setModal(null)}><form onSubmit={addClient}><Field name="name" label="Nombre completo" required/><div className="grid2"><Field name="nationality" label="Nacionalidad"/><Field name="phone" label="Teléfono"/></div><Field name="email" label="Correo" type="email"/><TextArea name="notes" label="Observaciones"/><Actions/></form></Modal>}
 
-      {modal === "matter" && <Modal title="Nuevo asunto" close={() => setModal(null)} wide><form onSubmit={addMatter}><div className="grid2"><Select name="client" label="Cliente" required options={clients.map((client) => [client.id, client.full_name])}/><Select name="type" label="Materia" required options={[["COMAR","COMAR"],["INM","Migración / INM"]]} /></div><MatterSubtype/><div className="grid3"><Select name="priority" label="Prioridad" options={priorities.map((item) => [item,item])}/><Field name="authority" label="Autoridad"/><Field name="office" label="Oficina"/></div><Field name="fileNumber" label="Expediente / NUT / folio"/><TextArea name="summary" label="Resumen estratégico"/><div className="grid2"><Field name="nextAction" label="Siguiente actuación"/><Field name="nextActionDue" label="Fecha de la siguiente actuación" type="datetime-local"/></div><Actions/></form></Modal>}
+      {modal === "matter" && <Modal title="Nuevo asunto" close={() => setModal(null)} wide><form onSubmit={addMatter}><Select name="client" label="Cliente" required options={clients.map((client) => [client.id, client.full_name])}/><MatterSubtype/><div className="grid3"><Select name="priority" label="Prioridad" options={priorities.map((item) => [item,item])}/><Field name="authority" label="Autoridad"/><Field name="office" label="Oficina"/></div><Field name="fileNumber" label="Expediente / NUT / folio"/><TextArea name="summary" label="Resumen estratégico"/><div className="grid2"><Field name="nextAction" label="Siguiente actuación"/><Field name="nextActionDue" label="Fecha de la siguiente actuación" type="datetime-local"/></div><Actions/></form></Modal>}
 
       {modal === "editMatter" && selectedMatter && <Modal title="Editar ficha del expediente" close={() => setModal(null)} wide><form onSubmit={editMatter}><div className="grid2"><Select name="priority" label="Prioridad" defaultValue={selectedMatter.priority} options={priorities.map((item) => [item,item])}/><Select name="status" label="Estado general" defaultValue={selectedMatter.status} options={[["OPEN","Abierto"],["PAUSED","Pausado"],["CLOSED","Cerrado"],["ARCHIVED","Archivado"]]}/></div><div className="grid2"><Field name="authority" label="Autoridad" defaultValue={selectedMatter.authority ?? ""}/><Field name="office" label="Oficina" defaultValue={selectedMatter.office ?? ""}/></div><Field name="fileNumber" label="Expediente / NUT / folio" defaultValue={selectedMatter.external_file_number ?? ""}/><TextArea name="summary" label="Resumen estratégico" defaultValue={selectedMatter.summary ?? ""}/><div className="grid2"><Field name="nextAction" label="Siguiente actuación" defaultValue={selectedMatter.next_action ?? ""}/><Field name="nextActionDue" label="Fecha" type="datetime-local" defaultValue={dateInput(selectedMatter.next_action_due_at)}/></div><Actions/></form></Modal>}
 
@@ -954,6 +955,6 @@ function Empty({ text }: { text: string }) { return <div className="empty">{text
 function Modal({ title, close, children, wide = false }: { title: string; close: () => void; children: React.ReactNode; wide?: boolean }) { return <div className="modalBack" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><div className={`modal ${wide ? "wide" : ""}`}><div className="rowBetween"><h2>{title}</h2><button className="secondary" onClick={close}>Cerrar</button></div>{children}</div></div>; }
 function Field({ name, label, type = "text", required = false, defaultValue = "" }: { name: string; label: string; type?: string; required?: boolean; defaultValue?: string }) { return <div className="field"><label>{label}</label><input name={name} type={type} required={required} defaultValue={defaultValue}/></div>; }
 function TextArea({ name, label, defaultValue = "" }: { name: string; label: string; defaultValue?: string }) { return <div className="field"><label>{label}</label><textarea name={name} defaultValue={defaultValue}/></div>; }
-function Select({ name, label, options, required = false, defaultValue }: { name: string; label: string; options: readonly (readonly [string,string])[] | [string,string][]; required?: boolean; defaultValue?: string }) { return <div className="field"><label>{label}</label><select name={name} required={required} defaultValue={defaultValue}>{options.map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></div>; }
-function SelectInline({ name, options, defaultValue }: { name: string; options: readonly (readonly [string,string])[] | [string,string][]; defaultValue?: string }) { return <select className="stateSelect" name={name} defaultValue={defaultValue}>{options.map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select>; }
+function Select({ name, label, options, required = false, defaultValue }: { name: string; label: string; options: ReadonlyArray<ReadonlyArray<string>>; required?: boolean; defaultValue?: string }) { return <div className="field"><label>{label}</label><select name={name} required={required} defaultValue={defaultValue}>{options.map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></div>; }
+function SelectInline({ name, options, defaultValue }: { name: string; options: ReadonlyArray<ReadonlyArray<string>>; defaultValue?: string }) { return <select className="stateSelect" name={name} defaultValue={defaultValue}>{options.map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select>; }
 function Actions() { return <div className="actions"><button className="primary" type="submit">Guardar</button></div>; }
