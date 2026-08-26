@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { inmOptions, inmTemplateFor } from "@/lib/inm-workflows";
+import { briefingDate, buildPriorityQueue, matterHealth, missingMatterFields, type JarvisPriorityItem } from "@/lib/jarvis-core";
 
 type Client = {
   id: string;
@@ -181,6 +182,8 @@ export default function Home() {
   const [matterFilter, setMatterFilter] = useState("ALL");
   const [jarvisQuery, setJarvisQuery] = useState("");
   const [jarvisAnswer, setJarvisAnswer] = useState("Pregunta por clientes, asuntos, términos, COMAR, INM, amparos o incidencias.");
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState("");
 
   useEffect(() => {
     let mounted = true;
@@ -196,6 +199,18 @@ export default function Home() {
       mounted = false;
       subscription.unsubscribe();
     };
+  }, []);
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandOpen((current) => !current);
+      }
+      if (event.key === "Escape") setCommandOpen(false);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   useEffect(() => {
@@ -627,6 +642,23 @@ export default function Home() {
     event?.preventDefault();
     const q = (override ?? jarvisQuery).trim().toLowerCase();
     if (!q) return;
+    if (q.includes("qué debo hacer") || q.includes("que debo hacer") || q.includes("prioridad") || q.includes("prioridades")) {
+      const top = jarvisQueue.slice(0, 8);
+      setJarvisAnswer(top.length ? `Prioridad recomendada: ${top.map((item, index) => `${index + 1}. ${item.title} — ${item.detail}`).join(" | ")}` : "No detecto asuntos que requieran atención inmediata.");
+      return;
+    }
+    if (q.includes("incomplet") || q.includes("falta información") || q.includes("falta informacion")) {
+      setJarvisAnswer(incompleteMatters.length ? `${incompleteMatters.length} expedientes requieren completar información operativa: ${incompleteMatters.slice(0, 8).map((matter) => `${matter.title} (${missingMatterFields(matter).join(", ")})`).join(" | ")}` : "No detecto expedientes con información operativa relevante pendiente de completar.");
+      return;
+    }
+    if (selectedMatter && (q.includes("este expediente") || q.includes("qué falta") || q.includes("que falta") || q.includes("analiza") || q.includes("salud"))) {
+      const health = matterHealth(selectedMatter, tasks, allIncidents);
+      const pending = tasks.filter((task) => task.matter_id === selectedMatter.id && task.status !== "DONE");
+      const risks = allIncidents.filter((incident) => incident.matter_id === selectedMatter.id && incident.status !== "RESOLVED");
+      const missing = missingMatterFields(selectedMatter);
+      setJarvisAnswer(`${selectedMatter.title}: salud operativa ${health.score}/100 (${health.label}). Etapa actual: ${currentStage?.workflow_template_stages?.name ?? "sin etapa identificada"}. ${pending.length} tarea(s) abierta(s), ${risks.length} incidencia(s) activa(s). ${missing.length ? `Falta completar: ${missing.join(", ")}.` : "Ficha operativa completa."} ${selectedMatter.next_action ? `Siguiente actuación: ${selectedMatter.next_action}.` : "No existe siguiente actuación definida."}`);
+      return;
+    }
     if (q.includes("incidencia") || q.includes("problema")) {
       const critical = allIncidents.filter((item) => ["HIGH", "CRITICAL"].includes(item.severity));
       setJarvisAnswer(critical.length ? `${critical.length} incidencias relevantes abiertas: ${critical.slice(0, 6).map((item) => `${item.title} (${matterTitle(item.matter_id ?? "")})`).join("; ")}.` : "No hay incidencias altas o críticas abiertas.");
@@ -656,14 +688,49 @@ export default function Home() {
     return matters.find((matter) => matter.id === id)?.title ?? "Asunto";
   }
 
+  function openJarvis(seed = "") {
+    setCommandQuery(seed);
+    if (seed) {
+      setJarvisQuery(seed);
+      void askJarvis(undefined, seed);
+    }
+    setCommandOpen(true);
+  }
+
+  function openPriorityItem(item: JarvisPriorityItem) {
+    if (!item.matter_id) {
+      setTab("tareas");
+      setCommandOpen(false);
+      return;
+    }
+    const matter = matters.find((candidate) => candidate.id === item.matter_id);
+    if (matter) void openMatter(matter, item.source === "TASK" ? "tareas" : "resumen");
+    setCommandOpen(false);
+  }
+
   const openMatters = useMemo(() => matters.filter((matter) => matter.status === "OPEN"), [matters]);
   const openTasks = useMemo(() => tasks.filter((task) => task.status !== "DONE"), [tasks]);
   const attentionTasks = useMemo(() => openTasks.filter((task) => isOverdue(task.due_at) || withinDays(task.due_at, 3) || task.priority === "URGENT"), [openTasks]);
   const stagnantMatters = useMemo(() => openMatters.filter((matter) => Date.now() - new Date(matter.updated_at).getTime() > 30 * 86_400_000), [openMatters]);
+  const jarvisQueue = useMemo(() => buildPriorityQueue(openMatters, openTasks, allIncidents), [openMatters, openTasks, allIncidents]);
+  const incompleteMatters = useMemo(() => openMatters.filter((matter) => missingMatterFields(matter).length >= 2), [openMatters]);
+  const lowestHealth = useMemo(() => openMatters.map((matter) => ({ matter, health: matterHealth(matter, tasks, allIncidents) })).sort((a, b) => a.health.score - b.health.score).slice(0, 6), [openMatters, tasks, allIncidents]);
   const linkedMatters = useMemo(() => selectedMatter ? matters.filter((matter) => matter.parent_matter_id === selectedMatter.id || matter.id === selectedMatter.parent_matter_id) : [], [matters, selectedMatter]);
   const matterTasks = useMemo(() => selectedMatter ? tasks.filter((task) => task.matter_id === selectedMatter.id) : [], [tasks, selectedMatter]);
   const activeIncidents = useMemo(() => incidents.filter((incident) => incident.status !== "RESOLVED"), [incidents]);
   const visibleMatters = useMemo(() => matters.filter((matter) => matterFilter === "ALL" || (matterFilter === "AMPARO" ? matter.matter_type.startsWith("AMPARO") : matter.matter_type === matterFilter)), [matters, matterFilter]);
+  const commandMatches = useMemo(() => {
+    const q = commandQuery.trim().toLowerCase();
+    if (!q) return { clients: [] as Client[], matters: [] as Matter[] };
+    return {
+      clients: clients.filter((client) => `${client.full_name} ${client.email ?? ""} ${client.phone ?? ""}`.toLowerCase().includes(q)).slice(0, 4),
+      matters: matters.filter((matter) => `${matter.title} ${matter.subtype ?? ""} ${matter.external_file_number ?? ""} ${clientName(matter.client_id)}`.toLowerCase().includes(q)).slice(0, 5),
+    };
+  }, [commandQuery, clients, matters]);
+
+  const selectedHealth = useMemo(() => selectedMatter ? matterHealth(selectedMatter, tasks, allIncidents) : null, [selectedMatter, tasks, allIncidents]);
+  const selectedMissing = useMemo(() => selectedMatter ? missingMatterFields(selectedMatter) : [], [selectedMatter]);
+
   const searchResults = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return { clients: [] as Client[], matters: [] as Matter[] };
@@ -686,7 +753,7 @@ export default function Home() {
   return (
     <div className="shell">
       <aside className="side">
-        <div className="brand brandV3"><div className="brandPlate"><img className="brandWordmark" src="./brand/fernandez-conde-horizontal.jpg" alt="Fernández Conde"/></div><small>OS · V3</small></div>
+        <div className="brand brandV3"><div className="brandPlate"><img className="brandWordmark" src="./brand/fernandez-conde-horizontal.jpg" alt="Fernández Conde"/></div><small>OS · V4</small></div>
         <nav className="nav">
           {[["inicio", "Inicio"], ["clientes", "Clientes"], ["asuntos", "Expedientes"], ["tareas", "Tareas y términos"], ["jarvis", "Jarvis"]].map(([key, label]) => (
             <button key={key} className={tab === key ? "on" : ""} onClick={() => { setTab(key as MainTab); if (key !== "asuntos") setSelectedMatter(null); if (key !== "clientes") setSelectedClient(null); }}>{label}</button>
@@ -709,14 +776,19 @@ export default function Home() {
               </div>
             )}
           </div>
-          <button className="primary" onClick={() => setModal("matter")}><Plus size={16}/> Nuevo asunto</button>
+          <div className="globalActions"><button className="jarvisTrigger" onClick={() => openJarvis()}><span>✦</span> Jarvis <kbd>Ctrl K</kbd></button><button className="primary" onClick={() => setModal("matter")}><Plus size={16}/> Nuevo asunto</button></div>
         </div>
 
         {notice && <div className="notice">{notice}<button onClick={() => setNotice("")}>×</button></div>}
 
         {tab === "inicio" && (
           <>
-            <PageHead eyebrow="PANEL DEL DESPACHO" title="Control operativo" description="Prioridades, términos, expedientes e incidencias en una sola vista." />
+            <PageHead eyebrow="PANEL DEL DESPACHO" title="Control operativo" description="V4 prioriza lo que requiere atención antes de que tengas que buscarlo." />
+            <section className="jarvisBriefing">
+              <div className="jarvisBriefingHead"><div><div className="ey">JARVIS BRIEFING · {briefingDate()}</div><h2>{jarvisQueue.length ? `${jarvisQueue.length} señales operativas detectadas` : "Operación bajo control"}</h2><p>{jarvisQueue.length ? "Ordenadas por urgencia, riesgo y vencimiento. Jarvis no modifica expedientes sin una acción tuya." : "No hay vencidos, incidencias altas ni alertas operativas relevantes."}</p></div><button className="jarvisPrimary" onClick={() => openJarvis("¿Qué debo hacer?")}>✦ ¿Qué debo hacer?</button></div>
+              <div className="jarvisPriorityStrip">{jarvisQueue.slice(0,4).map((item) => <button key={item.id} onClick={() => openPriorityItem(item)}><span className={`jarvisLevel ${item.level.toLowerCase()}`}>{item.level}</span><b>{item.title}</b><small>{item.detail}{item.matter_id ? ` · ${matterTitle(item.matter_id)}` : ""}</small></button>)}{!jarvisQueue.length && <div className="jarvisCalm">✓ Sin prioridades críticas detectadas.</div>}</div>
+              <div className="jarvisBriefingFoot"><span>{incompleteMatters.length} expediente(s) por completar</span><span>{stagnantMatters.length} sin movimiento &gt;30 días</span><button onClick={() => openJarvis("Expedientes incompletos")}>Revisar calidad de datos →</button></div>
+            </section>
             <div className="cards">
               <Metric icon={<BriefcaseBusiness size={18}/>} label="Asuntos abiertos" value={openMatters.length} />
               <Metric icon={<CalendarClock size={18}/>} label="Atención ≤ 3 días" value={attentionTasks.length} emphasis={attentionTasks.length > 0} />
@@ -769,6 +841,12 @@ export default function Home() {
         )}
 
         {tab === "asuntos" && selectedMatter && (
+          <>
+          <section className="jarvisCasePulse">
+            <div className="jarvisCaseScore"><span>JARVIS · SALUD</span><strong className={`health-${selectedHealth?.tone.toLowerCase()}`}>{selectedHealth?.score ?? 100}</strong><small>/100 · {selectedHealth?.label}</small></div>
+            <div className="jarvisCaseRead"><b>{selectedHealth && selectedHealth.score < 70 ? "Este expediente requiere atención." : "Expediente operativo estable."}</b><p>{selectedMissing.length ? `Conviene completar: ${selectedMissing.join(", ")}.` : "No detecto campos operativos esenciales pendientes."}</p></div>
+            <div className="jarvisCaseActions"><button onClick={() => openJarvis("Analiza este expediente")}>✦ Analizar</button>{selectedMissing.length > 0 && <button onClick={() => setModal("editMatter")}>Completar ficha</button>}{selectedHealth?.overdue ? <button onClick={() => setMatterTab("tareas")}>Revisar vencidos ({selectedHealth.overdue})</button> : null}{!selectedMatter.next_action && <button onClick={() => setModal("editMatter")}>Definir siguiente actuación</button>}</div>
+          </section>
           <MatterCenter
             matter={selectedMatter}
             client={clientName(selectedMatter.client_id)}
@@ -793,6 +871,7 @@ export default function Home() {
             onToggleTask={(task) => void toggleTask(task)}
             onOpenLinked={(matter) => void openMatter(matter)}
           />
+          </>
         )}
 
         {tab === "tareas" && (
@@ -809,7 +888,12 @@ export default function Home() {
 
         {tab === "jarvis" && (
           <>
-            <PageHead eyebrow="JARVIS · LECTURA" title="Consulta del despacho" description="V3 consulta la información estructurada de FC OS; Finanzas permanece fuera de esta versión y Jarvis no ejecuta acciones jurídicas autónomas." />
+            <PageHead eyebrow="JARVIS CORE · V4" title="Centro de inteligencia operativa" description="Reglas, prioridades, calidad de expedientes y consulta contextual. Finanzas permanece fuera de esta versión." action={<button className="jarvisPrimary" onClick={() => openJarvis("¿Qué debo hacer?")}>✦ ¿Qué debo hacer?</button>} />
+            <div className="jarvisWorkspace">
+              <section className="jarvisWorkspaceCard"><div className="ey">PRIORIDAD</div><h3>Cola recomendada</h3>{jarvisQueue.slice(0,5).map((item,index) => <button className="jarvisQueueRow" key={item.id} onClick={() => openPriorityItem(item)}><span>{index+1}</span><div><b>{item.title}</b><small>{item.detail}</small></div><span className={`jarvisLevel ${item.level.toLowerCase()}`}>{item.level}</span></button>)}{!jarvisQueue.length && <Empty text="Sin prioridades críticas." />}</section>
+              <section className="jarvisWorkspaceCard"><div className="ey">SALUD OPERATIVA</div><h3>Expedientes a vigilar</h3>{lowestHealth.map(({matter,health}) => <button className="healthRow" key={matter.id} onClick={() => void openMatter(matter)}><strong className={`health-${health.tone.toLowerCase()}`}>{health.score}</strong><div><b>{matter.title}</b><small>{health.label} · {health.missing.length} dato(s) pendiente(s)</small></div></button>)}{!lowestHealth.length && <Empty text="Todavía no hay expedientes." />}</section>
+              <section className="jarvisWorkspaceCard"><div className="ey">CALIDAD DE DATOS</div><h3>{incompleteMatters.length} expediente(s) incompletos</h3><p className="jarvisWorkspaceText">V3 permitió capturar rápido; V4 detecta qué conviene completar después sin volver obligatorios esos campos al inicio.</p><button className="secondary" onClick={() => openJarvis("Expedientes incompletos")}>Ver faltantes</button></section>
+            </div>
             <section className="jarvisPanel">
               <div className="jarvisMark">J</div>
               <div className="jarvisBody"><p>{jarvisAnswer}</p></div>
@@ -819,6 +903,8 @@ export default function Home() {
           </>
         )}
       </main>
+
+      {commandOpen && <div className="commandOverlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setCommandOpen(false); }}><div className="commandPalette"><div className="commandHeader"><span className="commandSpark">✦</span><input autoFocus value={commandQuery} onChange={(event) => setCommandQuery(event.target.value)} placeholder={selectedMatter ? `Preguntar sobre ${selectedMatter.title}…` : "Buscar o preguntar a Jarvis…"}/><kbd>ESC</kbd></div><div className="commandQuick">{["¿Qué debo hacer?","Expedientes incompletos","Incidencias críticas","Amparos abiertos"].map((prompt) => <button key={prompt} onClick={() => { setCommandQuery(prompt); setJarvisQuery(prompt); void askJarvis(undefined,prompt); }}>{prompt}</button>)}</div>{commandQuery && (commandMatches.clients.length > 0 || commandMatches.matters.length > 0) && <div className="commandResults"><div className="commandLabel">RESULTADOS</div>{commandMatches.clients.map((client) => <button key={client.id} onClick={() => { setSelectedClient(client); setSelectedMatter(null); setTab("clientes"); setCommandOpen(false); }}><span>CLIENTE</span><b>{client.full_name}</b></button>)}{commandMatches.matters.map((matter) => <button key={matter.id} onClick={() => { void openMatter(matter); setCommandOpen(false); }}><span>{matter.matter_type}</span><b>{matter.title}</b><small>{matter.external_file_number || matter.subtype}</small></button>)}</div>}<form className="commandAsk" onSubmit={(event) => { event.preventDefault(); setJarvisQuery(commandQuery); void askJarvis(undefined,commandQuery); }}><button className="jarvisPrimary" disabled={!commandQuery.trim()}>✦ Consultar a Jarvis</button></form><div className="commandAnswer"><div className="commandLabel">JARVIS</div><p>{jarvisAnswer}</p></div><div className="commandFooter"><span>Ctrl/⌘ + K para abrir desde cualquier pantalla</span><span>V4 no ejecuta cambios automáticamente</span></div></div></div>}
 
       {modal === "client" && <Modal title="Nuevo cliente" close={() => setModal(null)}><form onSubmit={addClient}><div className="quickIntro"><span>CAPTURA RÁPIDA</span><b>Solo el nombre es indispensable.</b><p>Los datos de contacto y observaciones pueden completarse después.</p></div><Field name="name" label="Nombre completo" required/><details className="advancedDetails"><summary>Agregar más datos <span>Opcional</span></summary><div className="advancedDetailsBody"><div className="grid2"><Field name="nationality" label="Nacionalidad"/><Field name="phone" label="Teléfono"/></div><Field name="email" label="Correo" type="email"/><TextArea name="notes" label="Observaciones"/></div></details><Actions/></form></Modal>}
 
@@ -926,7 +1012,7 @@ function Auth() {
       setMessage(result.error ? result.error.message : "Cuenta creada. Revisa tu correo para confirmar y después inicia sesión.");
     }
   }
-  return <div className="auth"><div className="authCard"><div className="authBrand brandAuthV3"><img className="authLogoMark" src="./brand/fernandez-conde-mark.jpg" alt="Isotipo Fernández Conde"/><div className="authBrandText"><img className="authLogoWordmark" src="./brand/fernandez-conde-horizontal.jpg" alt="Fernández Conde"/><div className="muted">OS · V3</div></div></div><h2>{mode === "in" ? "Iniciar sesión" : "Crear acceso"}</h2><p>Sistema operativo jurídico. Finanzas permanece independiente.</p>{message && <div className="authMsg">{message}</div>}<form onSubmit={submit}><Field name="email" label="Correo" type="email" required/><Field name="password" label="Contraseña" type="password" required/><button className="primary full">{mode === "in" ? "Entrar" : "Crear cuenta"}</button></form><button className="secondary full" onClick={() => setMode(mode === "in" ? "up" : "in")}>{mode === "in" ? "Crear una cuenta" : "Ya tengo cuenta"}</button></div></div>;
+  return <div className="auth"><div className="authCard"><div className="authBrand brandAuthV3"><img className="authLogoMark" src="./brand/fernandez-conde-mark.jpg" alt="Isotipo Fernández Conde"/><div className="authBrandText"><img className="authLogoWordmark" src="./brand/fernandez-conde-horizontal.jpg" alt="Fernández Conde"/><div className="muted">OS · V4</div></div></div><h2>{mode === "in" ? "Iniciar sesión" : "Crear acceso"}</h2><p>Sistema operativo jurídico. Finanzas permanece independiente.</p>{message && <div className="authMsg">{message}</div>}<form onSubmit={submit}><Field name="email" label="Correo" type="email" required/><Field name="password" label="Contraseña" type="password" required/><button className="primary full">{mode === "in" ? "Entrar" : "Crear cuenta"}</button></form><button className="secondary full" onClick={() => setMode(mode === "in" ? "up" : "in")}>{mode === "in" ? "Crear una cuenta" : "Ya tengo cuenta"}</button></div></div>;
 }
 
 function MatterSubtype() {
